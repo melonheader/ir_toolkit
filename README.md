@@ -1,6 +1,6 @@
 ### Optional: OpenSpliceAI
 
-Some utilities (e.g., `ir_trainer.load_spliceAI_model`) require OpenSpliceAI.
+Some utilities (e.g., `ir_toolkit.load_spliceAI_model`) require OpenSpliceAI.
 Install it manually:
 
 ```bash
