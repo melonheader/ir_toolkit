@@ -293,8 +293,9 @@ class IntronEndLightning(pl.LightningModule):
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optim, mode='max', factor=self.scheduler_factor, patience=self.scheduler_patience
         )
+        print({'scheduler': sched, 'monitor': 'val_loss', 'interval': 'epoch', 'reduce_on_plateau': True})
         return {'optimizer': optim,
-                'lr_scheduler': {'scheduler': sched, 'monitor': 'val_auroc', 'interval': 'epoch', 'reduce_on_plateau': True}}
+                'lr_scheduler': {'scheduler': sched, 'monitor': 'val_loss', 'interval': 'epoch', 'reduce_on_plateau': True}}
 
 
 class LogCollector(pl.Callback):
