@@ -34,8 +34,11 @@ def setup_training(
     train_loader,
     backbone_model=None,
     feat_dim=768,
+    attn_hidden_dim=256,
     use_attention_pooling=False,
-    use_joint_classifier=True,
+    use_joint_classifier=False,
+    jc_head_hidden=16,
+    use_simple_fusion=False,
     use_middle=False,
     middle_dim=0,
     lr=1e-4,
@@ -66,10 +69,12 @@ def setup_training(
         backbone=backbone_model,
         feat_dim=feat_dim,
         use_attention_pooling=use_attention_pooling,
+        attn_hidden=attn_hidden_dim,
+        use_simple_fusion=use_simple_fusion,
         use_joint_classifier=use_joint_classifier,
+        jc_head_hidden=jc_head_hidden,
         use_middle=use_middle,
         middle_dim=middle_dim,
-        use_simple_fusion=False,
     )
 
     lightning_model = IntronEndLightning(

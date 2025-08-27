@@ -7,3 +7,4 @@ Install it manually:
 git clone https://github.com/Kuanhao-Chao/OpenSpliceAI.git
 cd OpenSpliceAI
 python setup.py install
+```

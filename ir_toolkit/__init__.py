@@ -1,73 +1,72 @@
 """
-ir_toolkit: Tools for intron retention training and analysis.
+ir_toolkit: intron-retention training & analysis.
 
-Public API is exposed lazily to keep `import ir_trainer` lightweight.
+This __init__ eagerly re-exports public API so that IDEs/Jupyter show
+signatures and docstrings directly on `import ir_toolkit as irt`.
 """
 
 from __future__ import annotations
-from typing import TYPE_CHECKING
 
+# ---- Version ---------------------------------------------------------------
 __version__ = "0.1.0"
 
-# Lazy attribute loader to avoid importing heavy submodules at package import time
-def __getattr__(name: str):
-    # light
-    if name in {"prepare_dataset", "load_fasta_to_dict"}:
-        from . import data as _m
-        return getattr(_m, name)
+# ---- Light (no heavy deps) ------------------------------------------------
+from .data import (
+    prepare_dataset,
+    load_fasta_to_dict,
+)
 
-    # encoding / datasets / embeddings (torch)
-    if name in {"seq_to_onehot", "seq_to_onehot_right_aligned"}:
-        from . import encoding as _m
-        return getattr(_m, name)
+# ---- Torch-based (Dataset/encoding/embeddings) ----------------------------
+from .encoding import (
+    seq_to_onehot,
+    seq_to_onehot_right_aligned,
+)
 
-    if name in {"IntronsEndsDataset", "introns_collate_fn"}:
-        from . import datasets as _m
-        return getattr(_m, name)
+from .datasets import (
+    IntronsEndsDataset,
+    introns_collate_fn,
+)
 
-    if name in {"compute_and_save_embeddings"}:
-        from . import embeddings as _m
-        return getattr(_m, name)
+from .embeddings import (
+    compute_and_save_embeddings,
+)
 
-    # models (torch + lightning)
-    if name in {
-        "ParnetBackbone", "SpliceAIBackbone", "load_spliceAI_model",
-        "CAMPerPositionHead", "IntronEndCAMModel", "IntronEndLightning", "LogCollector",
-    }:
-        from . import models as _m
-        return getattr(_m, name)
+# ---- Models / Lightning ----------------------------------------------------
+from .models import (
+    ParnetBackbone,
+    SpliceAIBackbone,
+    load_spliceAI_model,
+    CAMPerPositionHead,
+    IntronEndCAMModel,
+    IntronEndLightning,
+    LogCollector,
+)
 
-    # trainer (lightning + sklearn)
-    if name in {"create_backbone_model", "setup_training", "run_training", "evaluate_model"}:
-        from . import trainer as _m
-        return getattr(_m, name)
+# ---- Trainer orchestration -------------------------------------------------
+from .trainer import (
+    create_backbone_model,
+    setup_training,
+    run_training,
+    evaluate_model,
+)
 
-    # viz (matplotlib + sklearn)
-    if name in {"plot_training_history", "visualize_cam_examples", "plot_roc_prc"}:
-        from . import viz as _m
-        return getattr(_m, name)
+# ---- Visualization ---------------------------------------------------------
+from .viz import (
+    plot_training_history,
+    visualize_cam_examples,
+    plot_roc_prc,
+)
 
-    raise AttributeError(f"module 'ir_trainer' has no attribute {name!r}")
-
-# For static analysis & IDEs (no runtime import)
-if TYPE_CHECKING:
-    from .data import prepare_dataset, load_fasta_to_dict
-    from .encoding import seq_to_onehot, seq_to_onehot_right_aligned
-    from .datasets import IntronsEndsDataset, introns_collate_fn
-    from .embeddings import compute_and_save_embeddings
-    from .models import (
-        ParnetBackbone, SpliceAIBackbone, load_spliceAI_model,
-        CAMPerPositionHead, IntronEndCAMModel, IntronEndLightning, LogCollector,
-    )
-    from .trainer import create_backbone_model, setup_training, run_training, evaluate_model
-    from .viz import plot_training_history, visualize_cam_examples, plot_roc_prc
-
+# ---- Public API surface ----------------------------------------------------
 __all__ = [
-    # light
+    "__version__",
+    # data
     "prepare_dataset", "load_fasta_to_dict",
-    # encoding / datasets / embeddings
+    # encoding
     "seq_to_onehot", "seq_to_onehot_right_aligned",
+    # datasets
     "IntronsEndsDataset", "introns_collate_fn",
+    # embeddings
     "compute_and_save_embeddings",
     # models
     "ParnetBackbone", "SpliceAIBackbone", "load_spliceAI_model",
@@ -76,5 +75,4 @@ __all__ = [
     "create_backbone_model", "setup_training", "run_training", "evaluate_model",
     # viz
     "plot_training_history", "visualize_cam_examples", "plot_roc_prc",
-    "__version__",
 ]
