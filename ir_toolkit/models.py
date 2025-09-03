@@ -4,9 +4,21 @@ import numpy as np
 
 import torch  # type: ignore
 import torch.nn as nn  # type: ignore
+import torch.nn.functional as F # type: ignore
 import pytorch_lightning as pl  # type: ignore
 from torchmetrics.classification import AUROC, Accuracy  # type: ignore
 
+def _masked_softmax(logits: torch.Tensor, mask: torch.Tensor, dim: int = -1, eps: float = 1e-8):
+    # mask: (B,L) in {0,1}
+    mask = mask.float()
+    # Large negative where masked to keep gradients finite
+    logits = logits.masked_fill(mask == 0, -1e9)
+    # Stabilise
+    logits = logits - logits.max(dim=dim, keepdim=True).values
+    # Exponentiate only valid positions
+    exps = torch.exp(logits) * mask
+    den = exps.sum(dim=dim, keepdim=True).clamp(min=eps)
+    return exps / den
 
 def load_spliceAI_model(weights_path: str, flanking_size: int = 400, SL: int = 256, device: str = 'cuda'):
     """
@@ -99,8 +111,9 @@ class CAMPerPositionHead(nn.Module):
 
         if self.use_attention_pooling:
             attn_logits = self.attention_pooling(feats).squeeze(1)
-            attn_logits = attn_logits.masked_fill(mask == 0, float('-inf'))
-            attn_weights = torch.softmax(attn_logits, dim=-1)
+            # attn_logits = attn_logits.masked_fill(mask == 0, float('-inf'))
+            # attn_weights = torch.softmax(attn_logits, dim=-1)
+            attn_weights = _masked_softmax(attn_logits, mask, dim=-1) 
             pooled = torch.einsum('bcl,bl->bc', feats, attn_weights)
         else:
             attn_weights = None
@@ -236,21 +249,29 @@ class IntronEndLightning(pl.LightningModule):
         self.val_auroc = AUROC(task="binary")
         self.train_acc = Accuracy(task="binary")
         self.val_acc = Accuracy(task="binary")
-
+        self._val_preds = []
+        self._val_tgts  = []
+        ##
         self.freeze_backbone_initial = freeze_backbone_initial
         self.unfreeze_after_epochs = unfreeze_after_epochs
         if freeze_backbone_initial:
             for p in self.model.backbone.parameters():
                 p.requires_grad = False
-
+        
     def forward(self, left, left_mask, right, right_mask, middle_vec=None):
         return self.model(left, left_mask, right, right_mask, middle_vec)
+    
+    def on_train_epoch_start(self):
+        if self.freeze_backbone_initial and self.unfreeze_after_epochs is not None:
+            if self.current_epoch == self.unfreeze_after_epochs:
+                for p in self.model.backbone.parameters():
+                    p.requires_grad = True
 
     def training_step(self, batch, batch_idx):
         ids, left, left_mask, right, right_mask, middle, labels = batch
         out = self(left, left_mask, right, right_mask, middle)
         logits = out['seq_logit']
-        loss = self.criterion(logits, labels)
+        loss = self.criterion(logits, labels.float())
         probs = torch.sigmoid(logits)
 
         self.train_auroc(probs, labels.long())
@@ -260,21 +281,34 @@ class IntronEndLightning(pl.LightningModule):
         self.log('train_auroc', self.train_auroc, on_step=False, on_epoch=True)
         self.log('train_acc', self.train_acc, on_step=False, on_epoch=True)
         return loss
+    
+    def on_validation_epoch_start(self):
+        self.val_auroc.reset()
+        self.val_acc.reset()
+        self._val_preds.clear()
+        self._val_tgts.clear()
 
     def validation_step(self, batch, batch_idx):
         ids, left, left_mask, right, right_mask, middle, labels = batch
         out = self(left, left_mask, right, right_mask, middle)
         logits = out['seq_logit']
-        loss = self.criterion(logits, labels)
+        loss = self.criterion(logits, labels.float())
         probs = torch.sigmoid(logits)
 
-        self.val_auroc(probs, labels.long())
-        self.val_acc((probs > 0.5).long(), labels.long())
+        # accumulate; do not update
+        self._val_preds.append(probs.detach())
+        self._val_tgts.append(labels.detach())
 
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_auroc', self.val_auroc, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_acc', self.val_acc, on_step=False, on_epoch=True, prog_bar=True)
-        return {'val_loss': loss, 'probs': probs.detach(), 'labels': labels.detach(), 'ids': ids}
+        return {'val_loss': loss}
+
+    def on_validation_epoch_end(self):
+        preds = torch.cat(self._val_preds)
+        tgts  = torch.cat(self._val_tgts).long()
+        self.val_auroc.update(preds, tgts)
+        self.val_acc.update((preds > 0.5).long(), tgts)
+        self.log('val_auroc', self.val_auroc.compute(), prog_bar=True)
+        self.log('val_acc',   self.val_acc.compute(),   prog_bar=True)
 
     def configure_optimizers(self):
         decay, no_decay = [], []
@@ -291,11 +325,19 @@ class IntronEndLightning(pl.LightningModule):
             lr=self.lr
         )
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optim, mode='max', factor=self.scheduler_factor, patience=self.scheduler_patience
+            optim, mode='min',
+            factor=self.scheduler_factor,
+            patience=self.scheduler_patience
         )
         print({'scheduler': sched, 'monitor': 'val_loss', 'interval': 'epoch', 'reduce_on_plateau': True})
         return {'optimizer': optim,
-                'lr_scheduler': {'scheduler': sched, 'monitor': 'val_loss', 'interval': 'epoch', 'reduce_on_plateau': True}}
+                'lr_scheduler': {
+                    'scheduler': sched,
+                    'monitor': 'val_loss',
+                    'interval': 'epoch',
+                    'reduce_on_plateau': True
+                    }
+                }
 
 
 class LogCollector(pl.Callback):
