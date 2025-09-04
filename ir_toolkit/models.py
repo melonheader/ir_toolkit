@@ -231,7 +231,9 @@ class IntronEndLightning(pl.LightningModule):
     def __init__(
         self,
         model: IntronEndCAMModel,
-        lr: float = 1e-4,
+        lr = 1e-4,              # head LR (joint/simple heads)
+        backbone_lr_base = 1e-5,        # base LR for backbone (max for deepest layer)
+        llrd_gamma = 0.7,
         weight_decay: float = 1e-6,
         pos_weight: Optional[float] = None,
         freeze_backbone_initial: bool = True,
@@ -242,6 +244,8 @@ class IntronEndLightning(pl.LightningModule):
         super().__init__()
         self.model = model
         self.lr = lr
+        self.backbone_lr_base = backbone_lr_base
+        self.llrd_gamma = llrd_gamma
         self.weight_decay = weight_decay
         self.scheduler_patience = scheduler_patience
         self.scheduler_factor = scheduler_factor
@@ -265,27 +269,57 @@ class IntronEndLightning(pl.LightningModule):
         if freeze_backbone_initial:
             for p in self.model.backbone.parameters():
                 p.requires_grad = False
-        
+    def _is_no_decay(self, name: str, p: torch.nn.Parameter) -> bool:
+        return (p.ndim == 1) or name.endswith(".bias") or ("bn" in name.lower()) or ("norm" in name.lower())
+
+    def _backbone_layers_in_order(self):
+        # returns list of (layer_name, module) in shallow→deep order
+        bb = self.model.backbone
+        layers = [("model.backbone.stem", bb.stem)]
+        for i, m in enumerate(bb.body):
+            layers.append((f"model.backbone.body.{i}", m))
+        return layers  # length = 15 (1 stem + 14 blocks)
+    
     def forward(self, left, left_mask, right, right_mask, middle_vec=None):
         return self.model(left, left_mask, right, right_mask, middle_vec)
-    
+
     # def on_train_epoch_start(self):
     #     if self.freeze_backbone_initial and self.unfreeze_after_epochs is not None:
     #         if self.current_epoch == self.unfreeze_after_epochs:
     #             for p in self.model.backbone.parameters():
     #                 p.requires_grad = True
+    #             # turn on lr for backbone params
+    #             optim = self.trainer.optimizers[0]
+    #             bb_params = set(self.model.backbone.parameters())
+    #             for g in optim.param_groups:
+    #                 if any(p in bb_params for p in g["params"]):
+    #                     g["lr"] = self.lr
+    #             print(f"[INFO] Unfroze backbone and enabled LR at epoch {self.current_epoch}")
+    
     def on_train_epoch_start(self):
+        # staged unfreeze: switch BB param-group LRs from 0 → LLRD schedule
         if self.freeze_backbone_initial and self.unfreeze_after_epochs is not None:
             if self.current_epoch == self.unfreeze_after_epochs:
                 for p in self.model.backbone.parameters():
                     p.requires_grad = True
-                # turn on lr for backbone params
+
+                # update optimizer param-group LRs according to LLRD now
                 optim = self.trainer.optimizers[0]
-                bb_params = set(self.model.backbone.parameters())
-                for g in optim.param_groups:
-                    if any(p in bb_params for p in g["params"]):
-                        g["lr"] = self.lr
-                print(f"[INFO] Unfroze backbone and enabled LR at epoch {self.current_epoch}")
+                layers = self._backbone_layers_in_order()
+                L = len(layers)
+
+                # walk groups that contain backbone params and set LR per depth
+                for k, (lname, lmod) in enumerate(layers):
+                    lr_k = self.backbone_lr_base * (self.llrd_gamma ** (L - 1 - k))
+                    layer_params = {p for _, p in lmod.named_parameters(recurse=True)}
+                    for g in optim.param_groups:
+                        if any(p in layer_params for p in g["params"]):
+                            g["lr"] = float(lr_k)
+
+                self.freeze_backbone_initial = False
+                print(f"[INFO] Unfroze backbone at epoch {self.current_epoch}; "
+                    f"BB LRs in [{self.backbone_lr_base*(self.llrd_gamma**(L-1)):.2e}, {self.backbone_lr_base:.2e}]")
+
 
     def training_step(self, batch, batch_idx):
         ids, left, left_mask, right, right_mask, middle, labels = batch
@@ -331,56 +365,72 @@ class IntronEndLightning(pl.LightningModule):
         self.log('val_acc',   self.val_acc.compute(),   prog_bar=True)
 
     # def configure_optimizers(self):
+    #     # split by decay/no_decay but INCLUDE backbone regardless of requires_grad
     #     decay, no_decay = [], []
     #     for name, p in self.named_parameters():
-    #         if not p.requires_grad:
-    #             continue
-    #         if len(p.shape) == 1 or name.endswith('.bias') or 'bn' in name.lower() or 'norm' in name.lower():
+    #         if p.ndim == 1 or name.endswith(".bias") or "bn" in name.lower() or "norm" in name.lower():
     #             no_decay.append(p)
     #         else:
     #             decay.append(p)
+
     #     optim = torch.optim.AdamW(
-    #         [{'params': decay, 'weight_decay': self.weight_decay},
-    #          {'params': no_decay, 'weight_decay': 0.0}],
-    #         lr=self.lr
+    #         [
+    #             {"params": decay,    "weight_decay": self.weight_decay, "lr": self.lr},
+    #             {"params": no_decay, "weight_decay": 0.0,               "lr": self.lr},
+    #         ],
+    #         lr=self.lr,
     #     )
+    #     # set its param group lr to 0
+    #     if self.freeze_backbone_initial:
+    #         bb_params = set(self.model.backbone.parameters())
+    #         for g in optim.param_groups:
+    #             if any(p in bb_params for p in g["params"]):
+    #                 g["lr"] = 0.0
+
     #     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    #         optim, mode='min',
-    #         factor=self.scheduler_factor,
-    #         patience=self.scheduler_patience
+    #         optim, mode="min", factor=self.scheduler_factor, patience=self.scheduler_patience
     #     )
-    #     print({'scheduler': sched, 'monitor': 'val_loss', 'interval': 'epoch', 'reduce_on_plateau': True})
-    #     return {'optimizer': optim,
-    #             'lr_scheduler': {
-    #                 'scheduler': sched,
-    #                 'monitor': 'val_loss',
-    #                 'interval': 'epoch',
-    #                 'reduce_on_plateau': True
-    #                 }
-    #             }
+    #     return {"optimizer": optim, "lr_scheduler": {"scheduler": sched, "monitor": "val_loss"}}
+
     def configure_optimizers(self):
-        # split by decay/no_decay but INCLUDE backbone regardless of requires_grad
-        decay, no_decay = [], []
-        for name, p in self.named_parameters():
-            if p.ndim == 1 or name.endswith(".bias") or "bn" in name.lower() or "norm" in name.lower():
-                no_decay.append(p)
+        # 1) split HEAD vs BACKBONE named params
+        head_named, bb_named = [], []
+        for n, p in self.named_parameters():
+            if n.startswith("model.backbone."):
+                bb_named.append((n, p))
             else:
-                decay.append(p)
+                head_named.append((n, p))
 
-        optim = torch.optim.AdamW(
-            [
-                {"params": decay,    "weight_decay": self.weight_decay, "lr": self.lr},
-                {"params": no_decay, "weight_decay": 0.0,               "lr": self.lr},
-            ],
-            lr=self.lr,
-        )
-        # set its param group lr to 0
-        if self.freeze_backbone_initial:
-            bb_params = set(self.model.backbone.parameters())
-            for g in optim.param_groups:
-                if any(p in bb_params for p in g["params"]):
-                    g["lr"] = 0.0
+        # 2) HEAD groups (single LR)
+        head_decay   = [p for n, p in head_named if not self._is_no_decay(n, p)]
+        head_nodecay = [p for n, p in head_named if     self._is_no_decay(n, p)]
+        param_groups = []
+        if head_decay:
+            param_groups.append({"params": head_decay,   "lr": self.lr, "weight_decay": self.weight_decay})
+        if head_nodecay:
+            param_groups.append({"params": head_nodecay, "lr": self.lr, "weight_decay": 0.0})
 
+        # 3) BACKBONE groups (LLRD)
+        layers = self._backbone_layers_in_order()
+        L = len(layers)
+        for k, (lname, lmod) in enumerate(layers):
+            # deeper layers (higher k) get larger LR ≈ backbone_lr_base * (gamma ** (L-1-k))
+            lr_k = self.backbone_lr_base * (self.llrd_gamma ** (L - 1 - k))
+            # when frozen initially, start at 0.0
+            if self.freeze_backbone_initial:
+                lr_k = 0.0
+
+            named = [(f"{lname}.{n}", p) for n, p in lmod.named_parameters(recurse=True)]
+            if not named:
+                continue
+            decay   = [p for n, p in named if not self._is_no_decay(n, p)]
+            nodecay = [p for n, p in named if     self._is_no_decay(n, p)]
+            if decay:
+                param_groups.append({"params": decay,   "lr": lr_k, "weight_decay": self.weight_decay})
+            if nodecay:
+                param_groups.append({"params": nodecay, "lr": lr_k, "weight_decay": 0.0})
+
+        optim = torch.optim.AdamW(param_groups)
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optim, mode="min", factor=self.scheduler_factor, patience=self.scheduler_patience
         )
