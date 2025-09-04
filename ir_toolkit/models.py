@@ -269,11 +269,23 @@ class IntronEndLightning(pl.LightningModule):
     def forward(self, left, left_mask, right, right_mask, middle_vec=None):
         return self.model(left, left_mask, right, right_mask, middle_vec)
     
+    # def on_train_epoch_start(self):
+    #     if self.freeze_backbone_initial and self.unfreeze_after_epochs is not None:
+    #         if self.current_epoch == self.unfreeze_after_epochs:
+    #             for p in self.model.backbone.parameters():
+    #                 p.requires_grad = True
     def on_train_epoch_start(self):
         if self.freeze_backbone_initial and self.unfreeze_after_epochs is not None:
             if self.current_epoch == self.unfreeze_after_epochs:
                 for p in self.model.backbone.parameters():
                     p.requires_grad = True
+                # turn on lr for backbone params
+                optim = self.trainer.optimizers[0]
+                bb_params = set(self.model.backbone.parameters())
+                for g in optim.param_groups:
+                    if any(p in bb_params for p in g["params"]):
+                        g["lr"] = self.lr
+                print(f"[INFO] Unfroze backbone and enabled LR at epoch {self.current_epoch}")
 
     def training_step(self, batch, batch_idx):
         ids, left, left_mask, right, right_mask, middle, labels = batch
@@ -318,34 +330,62 @@ class IntronEndLightning(pl.LightningModule):
         self.log('val_auroc', self.val_auroc.compute(), prog_bar=True)
         self.log('val_acc',   self.val_acc.compute(),   prog_bar=True)
 
+    # def configure_optimizers(self):
+    #     decay, no_decay = [], []
+    #     for name, p in self.named_parameters():
+    #         if not p.requires_grad:
+    #             continue
+    #         if len(p.shape) == 1 or name.endswith('.bias') or 'bn' in name.lower() or 'norm' in name.lower():
+    #             no_decay.append(p)
+    #         else:
+    #             decay.append(p)
+    #     optim = torch.optim.AdamW(
+    #         [{'params': decay, 'weight_decay': self.weight_decay},
+    #          {'params': no_decay, 'weight_decay': 0.0}],
+    #         lr=self.lr
+    #     )
+    #     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    #         optim, mode='min',
+    #         factor=self.scheduler_factor,
+    #         patience=self.scheduler_patience
+    #     )
+    #     print({'scheduler': sched, 'monitor': 'val_loss', 'interval': 'epoch', 'reduce_on_plateau': True})
+    #     return {'optimizer': optim,
+    #             'lr_scheduler': {
+    #                 'scheduler': sched,
+    #                 'monitor': 'val_loss',
+    #                 'interval': 'epoch',
+    #                 'reduce_on_plateau': True
+    #                 }
+    #             }
     def configure_optimizers(self):
+        # split by decay/no_decay but INCLUDE backbone regardless of requires_grad
         decay, no_decay = [], []
         for name, p in self.named_parameters():
-            if not p.requires_grad:
-                continue
-            if len(p.shape) == 1 or name.endswith('.bias') or 'bn' in name.lower() or 'norm' in name.lower():
+            if p.ndim == 1 or name.endswith(".bias") or "bn" in name.lower() or "norm" in name.lower():
                 no_decay.append(p)
             else:
                 decay.append(p)
+
         optim = torch.optim.AdamW(
-            [{'params': decay, 'weight_decay': self.weight_decay},
-             {'params': no_decay, 'weight_decay': 0.0}],
-            lr=self.lr
+            [
+                {"params": decay,    "weight_decay": self.weight_decay, "lr": self.lr},
+                {"params": no_decay, "weight_decay": 0.0,               "lr": self.lr},
+            ],
+            lr=self.lr,
         )
+        # set its param group lr to 0
+        if self.freeze_backbone_initial:
+            bb_params = set(self.model.backbone.parameters())
+            for g in optim.param_groups:
+                if any(p in bb_params for p in g["params"]):
+                    g["lr"] = 0.0
+
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optim, mode='min',
-            factor=self.scheduler_factor,
-            patience=self.scheduler_patience
+            optim, mode="min", factor=self.scheduler_factor, patience=self.scheduler_patience
         )
-        print({'scheduler': sched, 'monitor': 'val_loss', 'interval': 'epoch', 'reduce_on_plateau': True})
-        return {'optimizer': optim,
-                'lr_scheduler': {
-                    'scheduler': sched,
-                    'monitor': 'val_loss',
-                    'interval': 'epoch',
-                    'reduce_on_plateau': True
-                    }
-                }
+        return {"optimizer": optim, "lr_scheduler": {"scheduler": sched, "monitor": "val_loss"}}
+
 
 
 class LogCollector(pl.Callback):
