@@ -8,17 +8,14 @@ import torch.nn.functional as F # type: ignore
 import pytorch_lightning as pl  # type: ignore
 from torchmetrics.classification import AUROC, Accuracy  # type: ignore
 
-def _masked_softmax(logits: torch.Tensor, mask: torch.Tensor, dim: int = -1, eps: float = 1e-8):
-    # mask: (B,L) in {0,1}
-    mask = mask.float()
-    # Large negative where masked to keep gradients finite
-    logits = logits.masked_fill(mask == 0, -1e9)
-    # Stabilise
-    logits = logits - logits.max(dim=dim, keepdim=True).values
-    # Exponentiate only valid positions
-    exps = torch.exp(logits) * mask
-    den = exps.sum(dim=dim, keepdim=True).clamp(min=eps)
-    return exps / den
+# def _masked_softmax(logits: torch.Tensor, mask: torch.Tensor, dim: int = -1, eps: float = 1e-8):
+#     # mask: (B,L) in {0,1}
+#     mask = mask.float()
+#     logits = logits.masked_fill(mask == 0, -1e9)
+#     logits = logits - logits.max(dim=dim, keepdim=True).values
+#     exps = torch.exp(logits) * mask
+#     den = exps.sum(dim=dim, keepdim=True).clamp(min=eps)
+#     return exps / den
 
 def load_spliceAI_model(weights_path: str, flanking_size: int = 400, SL: int = 256, device: str = 'cuda'):
     """
@@ -110,11 +107,22 @@ class CAMPerPositionHead(nn.Module):
             mask = torch.ones(B, L, device=feats.device)
 
         if self.use_attention_pooling:
-            attn_logits = self.attention_pooling(feats).squeeze(1)
+            # attn_logits = self.attention_pooling(feats).squeeze(1)
             # attn_logits = attn_logits.masked_fill(mask == 0, float('-inf'))
             # attn_weights = torch.softmax(attn_logits, dim=-1)
-            attn_weights = _masked_softmax(attn_logits, mask, dim=-1) 
+            # #attn_weights = _masked_softmax(attn_logits, mask, dim=-1) 
+            # pooled = torch.einsum('bcl,bl->bc', feats, attn_weights)
+            ##
+            attn_logits = self.attention_pooling(feats).squeeze(1)      # (B, L)
+            neg_large = torch.finfo(attn_logits.dtype).min
+            x = attn_logits.masked_fill(mask == 0, neg_large)
+            attn_weights = torch.softmax(x, dim=-1)
+            # strict zero + renorm:
+            attn_weights = attn_weights * mask.to(attn_logits.dtype)
+            attn_weights = attn_weights / attn_weights.sum(-1, keepdim=True).clamp_min(1e-8)
+
             pooled = torch.einsum('bcl,bl->bc', feats, attn_weights)
+
         else:
             attn_weights = None
             mexp = mask.unsqueeze(1)
