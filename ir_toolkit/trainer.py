@@ -41,7 +41,9 @@ def setup_training(
     use_simple_fusion=False,
     use_middle=False,
     middle_dim=0,
-    lr=1e-4,
+    lr = 1e-4,              # head LR (joint/simple heads)
+    backbone_lr_base = 1e-5,        # base LR for backbone (max for deepest layer)
+    llrd_gamma = 0.7,
     weight_decay=1e-5,
     max_epochs=50,
     patience=10,
@@ -80,6 +82,8 @@ def setup_training(
     lightning_model = IntronEndLightning(
         model=cam_model,
         lr=lr,
+        backbone_lr_base=backbone_lr_base,
+        llrd_gamma=llrd_gamma,
         weight_decay=weight_decay,
         pos_weight=pos_weight,
         freeze_backbone_initial=freeze_backbone_initial,

@@ -278,7 +278,7 @@ class IntronEndLightning(pl.LightningModule):
         layers = [("model.backbone.stem", bb.stem)]
         for i, m in enumerate(bb.body):
             layers.append((f"model.backbone.body.{i}", m))
-        return layers  # length = 15 (1 stem + 14 blocks)
+        return layers
     
     def forward(self, left, left_mask, right, right_mask, middle_vec=None):
         return self.model(left, left_mask, right, right_mask, middle_vec)
@@ -295,7 +295,7 @@ class IntronEndLightning(pl.LightningModule):
     #                 if any(p in bb_params for p in g["params"]):
     #                     g["lr"] = self.lr
     #             print(f"[INFO] Unfroze backbone and enabled LR at epoch {self.current_epoch}")
-    
+
     def on_train_epoch_start(self):
         # staged unfreeze: switch BB param-group LRs from 0 → LLRD schedule
         if self.freeze_backbone_initial and self.unfreeze_after_epochs is not None:
