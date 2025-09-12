@@ -393,7 +393,7 @@ class IntronEndLightning(pl.LightningModule):
     #     return {"optimizer": optim, "lr_scheduler": {"scheduler": sched, "monitor": "val_loss"}}
 
     def configure_optimizers(self):
-        # 1) split HEAD vs BACKBONE named params
+        # split HEAD vs BACKBONE named params
         head_named, bb_named = [], []
         for n, p in self.named_parameters():
             if n.startswith("model.backbone."):
@@ -401,7 +401,7 @@ class IntronEndLightning(pl.LightningModule):
             else:
                 head_named.append((n, p))
 
-        # 2) HEAD groups (single LR)
+        # HEAD groups (single LR)
         head_decay   = [p for n, p in head_named if not self._is_no_decay(n, p)]
         head_nodecay = [p for n, p in head_named if     self._is_no_decay(n, p)]
         param_groups = []
@@ -410,7 +410,7 @@ class IntronEndLightning(pl.LightningModule):
         if head_nodecay:
             param_groups.append({"params": head_nodecay, "lr": self.lr, "weight_decay": 0.0})
 
-        # 3) BACKBONE groups (LLRD)
+        # BACKBONE groups (LLRD)
         layers = self._backbone_layers_in_order()
         L = len(layers)
         for k, (lname, lmod) in enumerate(layers):
