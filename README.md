@@ -124,7 +124,7 @@ irt.visualize_cam_examples(results, sequences, num_examples=5,
                           save_path="cam_examples.png")
 ```
 
-## 🏗️ Architecture Overview
+## Architecture Overview
 
 ### Model Components
 
@@ -149,7 +149,7 @@ irt.visualize_cam_examples(results, sequences, num_examples=5,
 - **Automatic Mixed Precision**: Faster training on modern GPUs
 - **Early Stopping & Checkpointing**: Robust training management
 
-## 📚 Advanced Usage
+## Advanced Usage
 
 ### Using SpliceAI Backbone
 
@@ -211,7 +211,3 @@ IR Toolkit provides built-in interpretability through Class Activation Mapping:
 - **Per-position importance**: Visualize which sequence positions contribute to predictions
 - **Left/right end analysis**: Separate analysis of 5' and 3' splice sites
 - **Feature importance weights**: Extract learned feature importance from GAP classifier
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
