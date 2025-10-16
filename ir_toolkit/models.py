@@ -107,11 +107,6 @@ class CAMPerPositionHead(nn.Module):
             mask = torch.ones(B, L, device=feats.device)
 
         if self.use_attention_pooling:
-            # attn_logits = self.attention_pooling(feats).squeeze(1)
-            # attn_logits = attn_logits.masked_fill(mask == 0, float('-inf'))
-            # attn_weights = torch.softmax(attn_logits, dim=-1)
-            # #attn_weights = _masked_softmax(attn_logits, mask, dim=-1) 
-            # pooled = torch.einsum('bcl,bl->bc', feats, attn_weights)
             ##
             attn_logits = self.attention_pooling(feats).squeeze(1)      # (B, L)
             neg_large = torch.finfo(attn_logits.dtype).min
@@ -120,18 +115,23 @@ class CAMPerPositionHead(nn.Module):
             # strict zero + renorm:
             attn_weights = attn_weights * mask.to(attn_logits.dtype)
             attn_weights = attn_weights / attn_weights.sum(-1, keepdim=True).clamp_min(1e-8)
-
             pooled = torch.einsum('bcl,bl->bc', feats, attn_weights)
-
         else:
             attn_weights = None
-            mexp = mask.unsqueeze(1)
-            pooled = (feats * mexp).sum(-1) / mexp.sum(-1).clamp(min=1e-8)
+            denom = mask.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+            pooled = (feats * mask.unsqueeze(1)).sum(-1) / denom
 
+        ## CAM module
         seq_logit = self.gap_classifier(pooled).squeeze(-1)
         w = self.gap_classifier.weight.squeeze(0)
+        b = self.gap_classifier.bias.squeeze(0)
         cam = torch.einsum('c,bcl->bl', w, feats).masked_fill(mask == 0, 0.0)
-        return cam, seq_logit, attn_weights
+        cam_signed = (cam + b) * mask
+        if self.use_attention_pooling:
+            cam_contribs = cam_signed * attn_weights
+        else:
+            cam_contribs = (cam_signed / denom) * mask
+        return cam_contribs, seq_logit, attn_weights
 
     def get_feature_importance(self):
         return self.gap_classifier.weight.detach().cpu().numpy().squeeze()
@@ -273,7 +273,7 @@ class IntronEndLightning(pl.LightningModule):
         return (p.ndim == 1) or name.endswith(".bias") or ("bn" in name.lower()) or ("norm" in name.lower())
 
     def _backbone_layers_in_order(self):
-        # returns list of (layer_name, module) in shallow→deep order
+        # returns list of (layer_name, module) in shallow -> deep order
         bb = self.model.backbone
         layers = [("model.backbone.stem", bb.stem)]
         for i, m in enumerate(bb.body):
@@ -283,31 +283,16 @@ class IntronEndLightning(pl.LightningModule):
     def forward(self, left, left_mask, right, right_mask, middle_vec=None):
         return self.model(left, left_mask, right, right_mask, middle_vec)
 
-    # def on_train_epoch_start(self):
-    #     if self.freeze_backbone_initial and self.unfreeze_after_epochs is not None:
-    #         if self.current_epoch == self.unfreeze_after_epochs:
-    #             for p in self.model.backbone.parameters():
-    #                 p.requires_grad = True
-    #             # turn on lr for backbone params
-    #             optim = self.trainer.optimizers[0]
-    #             bb_params = set(self.model.backbone.parameters())
-    #             for g in optim.param_groups:
-    #                 if any(p in bb_params for p in g["params"]):
-    #                     g["lr"] = self.lr
-    #             print(f"[INFO] Unfroze backbone and enabled LR at epoch {self.current_epoch}")
-
     def on_train_epoch_start(self):
-        # staged unfreeze: switch BB param-group LRs from 0 → LLRD schedule
+        # staged unfreeze: switch BB param-group LRs from 0 -> LLRD schedule
         if self.freeze_backbone_initial and self.unfreeze_after_epochs is not None:
             if self.current_epoch == self.unfreeze_after_epochs:
                 for p in self.model.backbone.parameters():
                     p.requires_grad = True
-
                 # update optimizer param-group LRs according to LLRD now
                 optim = self.trainer.optimizers[0]
                 layers = self._backbone_layers_in_order()
                 L = len(layers)
-
                 # walk groups that contain backbone params and set LR per depth
                 for k, (lname, lmod) in enumerate(layers):
                     lr_k = self.backbone_lr_base * (self.llrd_gamma ** (L - 1 - k))
@@ -319,7 +304,6 @@ class IntronEndLightning(pl.LightningModule):
                 self.freeze_backbone_initial = False
                 print(f"[INFO] Unfroze backbone at epoch {self.current_epoch}; "
                     f"BB LRs in [{self.backbone_lr_base*(self.llrd_gamma**(L-1)):.2e}, {self.backbone_lr_base:.2e}]")
-
 
     def training_step(self, batch, batch_idx):
         ids, left, left_mask, right, right_mask, middle, labels = batch
@@ -364,36 +348,8 @@ class IntronEndLightning(pl.LightningModule):
         self.log('val_auroc', self.val_auroc.compute(), prog_bar=True)
         self.log('val_acc',   self.val_acc.compute(),   prog_bar=True)
 
-    # def configure_optimizers(self):
-    #     # split by decay/no_decay but INCLUDE backbone regardless of requires_grad
-    #     decay, no_decay = [], []
-    #     for name, p in self.named_parameters():
-    #         if p.ndim == 1 or name.endswith(".bias") or "bn" in name.lower() or "norm" in name.lower():
-    #             no_decay.append(p)
-    #         else:
-    #             decay.append(p)
-
-    #     optim = torch.optim.AdamW(
-    #         [
-    #             {"params": decay,    "weight_decay": self.weight_decay, "lr": self.lr},
-    #             {"params": no_decay, "weight_decay": 0.0,               "lr": self.lr},
-    #         ],
-    #         lr=self.lr,
-    #     )
-    #     # set its param group lr to 0
-    #     if self.freeze_backbone_initial:
-    #         bb_params = set(self.model.backbone.parameters())
-    #         for g in optim.param_groups:
-    #             if any(p in bb_params for p in g["params"]):
-    #                 g["lr"] = 0.0
-
-    #     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    #         optim, mode="min", factor=self.scheduler_factor, patience=self.scheduler_patience
-    #     )
-    #     return {"optimizer": optim, "lr_scheduler": {"scheduler": sched, "monitor": "val_loss"}}
-
     def configure_optimizers(self):
-        # split HEAD vs BACKBONE named params
+        # 1) split HEAD vs BACKBONE named params
         head_named, bb_named = [], []
         for n, p in self.named_parameters():
             if n.startswith("model.backbone."):
@@ -401,7 +357,7 @@ class IntronEndLightning(pl.LightningModule):
             else:
                 head_named.append((n, p))
 
-        # HEAD groups (single LR)
+        # 2) HEAD groups (single LR)
         head_decay   = [p for n, p in head_named if not self._is_no_decay(n, p)]
         head_nodecay = [p for n, p in head_named if     self._is_no_decay(n, p)]
         param_groups = []
@@ -410,16 +366,15 @@ class IntronEndLightning(pl.LightningModule):
         if head_nodecay:
             param_groups.append({"params": head_nodecay, "lr": self.lr, "weight_decay": 0.0})
 
-        # BACKBONE groups (LLRD)
+        # 3) BACKBONE groups (LLRD)
         layers = self._backbone_layers_in_order()
         L = len(layers)
         for k, (lname, lmod) in enumerate(layers):
-            # deeper layers (higher k) get larger LR ≈ backbone_lr_base * (gamma ** (L-1-k))
+            # deeper layers (higher k) get larger LR ~ backbone_lr_base * (gamma ** (L-1-k))
             lr_k = self.backbone_lr_base * (self.llrd_gamma ** (L - 1 - k))
-            # when frozen initially, start at 0.0
+            # when frozen initially, LR starts at 0.0
             if self.freeze_backbone_initial:
                 lr_k = 0.0
-
             named = [(f"{lname}.{n}", p) for n, p in lmod.named_parameters(recurse=True)]
             if not named:
                 continue
@@ -429,14 +384,11 @@ class IntronEndLightning(pl.LightningModule):
                 param_groups.append({"params": decay,   "lr": lr_k, "weight_decay": self.weight_decay})
             if nodecay:
                 param_groups.append({"params": nodecay, "lr": lr_k, "weight_decay": 0.0})
-
         optim = torch.optim.AdamW(param_groups)
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optim, mode="min", factor=self.scheduler_factor, patience=self.scheduler_patience
         )
         return {"optimizer": optim, "lr_scheduler": {"scheduler": sched, "monitor": "val_loss"}}
-
-
 
 class LogCollector(pl.Callback):
     def __init__(self):
