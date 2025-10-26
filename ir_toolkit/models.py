@@ -35,6 +35,8 @@ def load_spliceAI_model(weights_path: str, flanking_size: int = 400, SL: int = 2
             "    git clone https://github.com/Kuanhao-Chao/OpenSpliceAI.git\n"
             "    cd OpenSpliceAI\n"
             "    python setup.py install\n\n"
+            "    OR use pip:\n"
+            "    pip install openspliceai\n\n"
             "After installation, re-run your code."
         ) from e
     L = 32
@@ -152,7 +154,7 @@ class IntronEndCAMModel(nn.Module):
         middle_dim: int = 0,
         use_joint_classifier: bool = False,
         use_simple_fusion: bool = False,
-        jc_head_hidden: int = 16,
+        jc_head_hidden: int = 8,
         dropout: float = 0.2,
     ):
         super().__init__()
@@ -237,7 +239,7 @@ class IntronEndLightning(pl.LightningModule):
         weight_decay: float = 1e-6,
         pos_weight: Optional[float] = None,
         freeze_backbone_initial: bool = True,
-        unfreeze_after_epochs: Optional[int] = 5,
+        unfreeze_after_epochs: Optional[int] = None,
         scheduler_patience: int = 3,
         scheduler_factor: float = 0.5,
     ):
@@ -269,19 +271,38 @@ class IntronEndLightning(pl.LightningModule):
         if freeze_backbone_initial:
             for p in self.model.backbone.parameters():
                 p.requires_grad = False
+                
     def _is_no_decay(self, name: str, p: torch.nn.Parameter) -> bool:
         return (p.ndim == 1) or name.endswith(".bias") or ("bn" in name.lower()) or ("norm" in name.lower())
 
     def _backbone_layers_in_order(self):
-        # returns list of (layer_name, module) in shallow -> deep order
+        # returns list of (layer_name, module) in shallow -> deep order !!! this will shoot out an eror
+        # on architectures different from parnet; need to rewrite for generality
+        """
+        Return [(name, module)] shallow->deep.
+        Works for SpliceAI/CNN (has stem/body),
+        otherwise falls back to the whole backbone as one layer.
+        """
         bb = self.model.backbone
-        layers = [("model.backbone.stem", bb.stem)]
-        for i, m in enumerate(bb.body):
-            layers.append((f"model.backbone.body.{i}", m))
-        return layers
-    
-    def forward(self, left, left_mask, right, right_mask, middle_vec=None):
-        return self.model(left, left_mask, right, right_mask, middle_vec)
+
+        # A) CNN/ResNet-like
+        if hasattr(bb, "stem") and hasattr(bb, "body"):
+            layers = [("model.backbone.stem", bb.stem)]
+            for i, m in enumerate(bb.body):
+                layers.append((f"model.backbone.body.{i}", m))
+            return layers
+
+        # B) SpliceAI-like
+        if hasattr(bb, "initial_conv") and hasattr(bb, "residual_units"):
+            layers = [("model.backbone.initial_conv", bb.initial_conv)]
+            if hasattr(bb, "initial_skip"):
+                layers.append(("model.backbone.initial_skip", bb.initial_skip))
+            for i, m in enumerate(bb.residual_units):
+                layers.append((f"model.backbone.residual_units.{i}", m))
+            return layers
+
+        # Fallback: treat whole backbone as one block
+        return [("model.backbone", bb)]
 
     def on_train_epoch_start(self):
         # staged unfreeze: switch BB param-group LRs from 0 -> LLRD schedule
@@ -304,6 +325,9 @@ class IntronEndLightning(pl.LightningModule):
                 self.freeze_backbone_initial = False
                 print(f"[INFO] Unfroze backbone at epoch {self.current_epoch}; "
                     f"BB LRs in [{self.backbone_lr_base*(self.llrd_gamma**(L-1)):.2e}, {self.backbone_lr_base:.2e}]")
+                
+    def forward(self, left, left_mask, right, right_mask, middle_vec=None):
+        return self.model(left, left_mask, right, right_mask, middle_vec)
 
     def training_step(self, batch, batch_idx):
         ids, left, left_mask, right, right_mask, middle, labels = batch
@@ -367,23 +391,24 @@ class IntronEndLightning(pl.LightningModule):
             param_groups.append({"params": head_nodecay, "lr": self.lr, "weight_decay": 0.0})
 
         # 3) BACKBONE groups (LLRD)
-        layers = self._backbone_layers_in_order()
-        L = len(layers)
-        for k, (lname, lmod) in enumerate(layers):
-            # deeper layers (higher k) get larger LR ~ backbone_lr_base * (gamma ** (L-1-k))
-            lr_k = self.backbone_lr_base * (self.llrd_gamma ** (L - 1 - k))
-            # when frozen initially, LR starts at 0.0
-            if self.freeze_backbone_initial:
-                lr_k = 0.0
-            named = [(f"{lname}.{n}", p) for n, p in lmod.named_parameters(recurse=True)]
-            if not named:
-                continue
-            decay   = [p for n, p in named if not self._is_no_decay(n, p)]
-            nodecay = [p for n, p in named if     self._is_no_decay(n, p)]
-            if decay:
-                param_groups.append({"params": decay,   "lr": lr_k, "weight_decay": self.weight_decay})
-            if nodecay:
-                param_groups.append({"params": nodecay, "lr": lr_k, "weight_decay": 0.0})
+        if not self.freeze_backbone_initial or self.unfreeze_after_epochs is not None:
+            layers = self._backbone_layers_in_order()
+            L = len(layers)
+            for k, (lname, lmod) in enumerate(layers):
+                # deeper layers (higher k) get larger LR ~ backbone_lr_base * (gamma ** (L-1-k))
+                lr_k = self.backbone_lr_base * (self.llrd_gamma ** (L - 1 - k))
+                # when frozen initially, start at LR 0.0
+                if self.freeze_backbone_initial:
+                    lr_k = 0.0
+                named = [(f"{lname}.{n}", p) for n, p in lmod.named_parameters(recurse=True)]
+                if not named:
+                    continue
+                decay   = [p for n, p in named if not self._is_no_decay(n, p)]
+                nodecay = [p for n, p in named if     self._is_no_decay(n, p)]
+                if decay:
+                    param_groups.append({"params": decay,   "lr": lr_k, "weight_decay": self.weight_decay})
+                if nodecay:
+                    param_groups.append({"params": nodecay, "lr": lr_k, "weight_decay": 0.0})
         optim = torch.optim.AdamW(param_groups)
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optim, mode="min", factor=self.scheduler_factor, patience=self.scheduler_patience

@@ -121,7 +121,7 @@ def setup_training(
         val_check_interval=val_check_interval,
         enable_checkpointing=True,
         enable_progress_bar=True,
-        enable_model_summary=True,
+        enable_model_summary=True
     )
     return trainer, lightning_model, log_collector, checkpoint_callback
 
