@@ -155,8 +155,8 @@ def evaluate_model(model, val_loader, device: Optional[str] = None):
             all_preds.extend(probs.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
             all_ids.extend(ids)
-            all_cam_left.append(outputs['cam_left'].cpu())
-            all_cam_right.append(outputs['cam_right'].cpu())
+            all_cam_left.append(outputs['cam_left'].cpu() if outputs['cam_left'] is not None else outputs['cam_left'])
+            all_cam_right.append(outputs['cam_right'].cpu() if outputs['cam_right'] is not None else outputs['cam_right'])
 
     all_preds = np.array(all_preds)
     all_labels = np.array(all_labels)
