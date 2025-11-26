@@ -41,7 +41,7 @@ def setup_training(
     use_simple_fusion=False,
     use_middle=False,
     middle_dim=0,
-    lr = 1e-4,              # head LR (joint/simple heads)
+    lr = 1e-4,                      # head LR (joint/simple heads)
     backbone_lr_base = 1e-5,        # base LR for backbone (max for deepest layer)
     llrd_gamma = 0.7,
     weight_decay=1e-5,
@@ -160,8 +160,12 @@ def evaluate_model(model, val_loader, device: Optional[str] = None):
 
     all_preds = np.array(all_preds)
     all_labels = np.array(all_labels)
-    all_cam_left = torch.cat(all_cam_left, dim=0)
-    all_cam_right = torch.cat(all_cam_right, dim=0)
+    if all_cam_left is not None and all(x is None for x in all_cam_left):
+        all_cam_left = None
+    if all_cam_right is not None and all(x is None for x in all_cam_right):
+        all_cam_right = None
+    all_cam_left = torch.cat(all_cam_left, dim=0) if all_cam_left is not None else all_cam_left
+    all_cam_right = torch.cat(all_cam_right, dim=0) if all_cam_right is not None else all_cam_right
     binary_preds = (all_preds > 0.5).astype(int)
 
     print("Classification Report:")
