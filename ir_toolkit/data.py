@@ -29,7 +29,16 @@ def prepare_dataset(
     if not (isinstance(class_lims, tuple) and len(class_lims) == 2):
         raise ValueError('class_lims must be a (low, high) tuple')
 
-    source = source.dropna(subset=[class_col]).copy().reset_index(drop=True)
+    # ensure EVENT is a column, preserving it if it's in the index
+    if 'EVENT' not in source.columns:
+        if source.index.name == 'EVENT' or (isinstance(source.index, pd.MultiIndex) and 'EVENT' in source.index.names):
+            source = source.reset_index()
+        else:
+            raise ValueError('Expected an "EVENT" column or index.')
+    else:
+        source = source.reset_index(drop=True)
+    
+    source = source.dropna(subset=[class_col]).copy()
 
     if col_filters:
         for col, (low, high) in col_filters.items():
@@ -39,9 +48,6 @@ def prepare_dataset(
             before = len(source)
             source = source[(source[col] >= low) & (source[col] < high)].copy()
             print(f'Filtered "{col}" in [{low}, {high}): {before} -> {len(source)} rows')
-
-    if 'EVENT' not in source.columns:
-        raise ValueError('Expected an "EVENT" column to use as index.')
 
     low, high = class_lims
     class_conds = [source[class_col] >= high, source[class_col] < low]
